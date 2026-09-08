@@ -1,0 +1,15 @@
+node_modules/
+.wrangler/
+dist/
+
+# Secrets — never commit.
+.dev.vars
+.dev.vars.*
+*.pem
+sa-key.json
+*-service-account*.json
+# Google downloads service-account keys as <project-id>-<key-id>.json,
+# which none of the patterns above match.
+coddi-dashboard-sync-*.json
+*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+!.dev.vars.example
