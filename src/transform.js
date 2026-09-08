@@ -496,10 +496,34 @@ export function lastLoggedStatus(normalized) {
  * `notBeforeMs` bounds how far back recovered rows may reach, so running this
  * over a wide activity window does not dump months of history into the sheet.
  */
+/**
+ * How close a logged event must be to updated_time to be taken as its cause.
+ * Meta stamps both from the same write, so the match is exact in practice.
+ */
+const EXPLAINS_UPDATE_MS = 2 * 60 * 1000;
+
 export function buildReconciliationRows(snapshot, normalized, options = {}) {
-  const { detectedAtMs = Date.now(), notBeforeMs = 0 } = options;
+  const {
+    detectedAtMs = Date.now(),
+    notBeforeMs = 0,
+    // Objects already recovered, as { [objectId]: reportedStatus }. Meta will
+    // never write the missing event, so the contradiction with the log is
+    // permanent — without this memo every sweep would re-report the same
+    // change forever, and with a drifting updated_time it would land as a new
+    // row each time rather than being deduped.
+    alreadyReported = {},
+  } = options;
   const logged = lastLoggedStatus(normalized);
   const ruleEvents = (normalized ?? []).filter((n) => n.isRule && !n.exclude);
+
+  // Every logged event per object, to test whether updated_time is already
+  // accounted for by something the log did record.
+  const eventsByObject = new Map();
+  for (const n of normalized ?? []) {
+    const list = eventsByObject.get(n.objectId);
+    if (list) list.push(n.ts);
+    else eventsByObject.set(n.objectId, [n.ts]);
+  }
 
   const rows = [];
   for (const [objectId, entry] of Object.entries(snapshot ?? {})) {
@@ -510,11 +534,25 @@ export function buildReconciliationRows(snapshot, normalized, options = {}) {
 
     const current = statusLabel(entry.status);
     if (!current || isTransient(current) || current === last.status) continue;
+    // Already recovered at this status. A later change away and back would
+    // differ from the memo and be reported again, as it should be.
+    if (alreadyReported[objectId] === current) continue;
 
     const changedAt = parseEventTime(entry.updatedTime);
     // Without a trustworthy time after the last logged event, the mismatch
     // cannot be placed on a timeline and is left alone.
     if (!Number.isFinite(changedAt) || changedAt <= last.ts) continue;
+
+    // If a logged event coincides with updated_time, that event is what bumped
+    // it — a rule editing a budget at 09:13 stamps 09:13 on an object whose
+    // unlogged status change may be weeks old. The mismatch is real but
+    // undateable, and dating it now would invent a change that did not happen
+    // today. Better silent than wrong.
+    const near = (eventsByObject.get(objectId) ?? []).some(
+      (ts) => Math.abs(ts - changedAt) <= EXPLAINS_UPDATE_MS,
+    );
+    if (near) continue;
+
     if (changedAt < notBeforeMs) continue;
 
     rows.push(

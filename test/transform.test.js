@@ -728,3 +728,65 @@ test('reconciliation and snapshot diffing produce identical row shapes', () => {
   assert.equal(viaDiff.from, viaReconcile.from);
   assert.equal(viaDiff.to, viaReconcile.to);
 });
+
+test('an already-recovered object is not reported again on the next sweep', () => {
+  const snapshot = {
+    x: { level: 'Ad', status: 'PAUSED', name: 'Ad', updatedTime: '2026-09-08T13:20:00+0300' },
+  };
+  const log = normalizeAll([
+    statusEvent({ time: '2026-08-25T09:00:00+0000', actor: RULE, objectId: 'x', from: 'Inactive', to: 'Active' }),
+  ]);
+  const opts = { detectedAtMs: NOW, notBeforeMs: TODAY };
+
+  assert.equal(buildReconciliationRows(snapshot, log, opts).length, 1);
+  assert.deepEqual(
+    buildReconciliationRows(snapshot, log, { ...opts, alreadyReported: { x: 'Inactive' } }),
+    [],
+  );
+});
+
+test('a recovered object that changes again is reported again', () => {
+  const snapshot = {
+    x: { level: 'Ad', status: 'ACTIVE', name: 'Ad', updatedTime: '2026-09-08T15:00:00+0300' },
+  };
+  const log = normalizeAll([
+    statusEvent({ time: '2026-08-25T09:00:00+0000', actor: RULE, objectId: 'x', from: 'Active', to: 'Inactive' }),
+  ]);
+  // Memo says it was last recovered as Inactive; it now reads Active again.
+  const rows = buildReconciliationRows(snapshot, log, {
+    detectedAtMs: NOW,
+    notBeforeMs: TODAY,
+    alreadyReported: { x: 'Inactive' },
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].to, 'Active');
+});
+
+test('a logged event coinciding with updated_time means the change is undateable', () => {
+  // Ad set 120251978719090136: last logged status Inactive on 25 Aug, live
+  // status ACTIVE, updated_time 09:13:47 — the exact moment a rule changed its
+  // budget. The status change is real but weeks old and cannot be dated, so
+  // reporting it as today would be an invention.
+  const snapshot = {
+    a: { level: 'Ad set', status: 'ACTIVE', name: 'Sweatpants Duo Static', updatedTime: '2026-09-08T09:13:47+0300' },
+  };
+  const log = normalizeAll([
+    statusEvent({ time: '2026-08-25T09:19:00+0000', actor: MOHANAD, objectId: 'a', from: 'Active', to: 'Inactive', code: 'update_ad_set_run_status' }),
+    budgetEvent({ time: '2026-09-08T06:13:47+0000', actor: RULE, objectId: 'a', fromPiastres: 40500, toPiastres: 36450, rule: 'CODDI AUTOSCALE-P | 2026-09 | Testing' }),
+  ]);
+  assert.deepEqual(buildReconciliationRows(snapshot, log, { detectedAtMs: NOW, notBeforeMs: TODAY }), []);
+});
+
+test('an object with no logged event at updated_time is still recovered', () => {
+  // The five silent ads: nothing in the log touched them, so updated_time can
+  // only be the unlogged status change itself.
+  const snapshot = {
+    a: { level: 'Ad', status: 'PAUSED', name: 'Grey Sweatpants | Model Wall | Video | V2', updatedTime: '2026-09-08T13:20:54+0300' },
+  };
+  const log = normalizeAll([
+    statusEvent({ time: '2026-08-25T09:22:04+0000', actor: RULE, objectId: 'a', from: 'Pending Review', to: 'Active' }),
+  ]);
+  const rows = buildReconciliationRows(snapshot, log, { detectedAtMs: NOW, notBeforeMs: TODAY });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].datetime, '2026-09-08 13:20');
+});

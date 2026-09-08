@@ -41,6 +41,12 @@ const FORMAT_VERSION = '2';
 /** Last seen status of every campaign, ad set and ad, for state diffing. */
 const SNAPSHOT_KEY = 'status_snapshot';
 /**
+ * Objects already recovered by reconciliation, as { [objectId]: status }.
+ * Meta never writes the missing event, so the contradiction with the log never
+ * resolves; without this the same change would be re-reported every sweep.
+ */
+const RECONCILED_KEY = 'reconciled_status';
+/**
  * Re-fetch an hour of already-seen events so a late-arriving event is caught.
  *
  * Do not widen this without changing how change_id is derived. A row's id comes
@@ -107,10 +113,14 @@ async function run(env, { dryRun = false, reconcile = false, emitSince = null } 
   // anything Meta failed to log before the first snapshot is invisible to it
   // forever. Reconciliation catches those by comparing live status against the
   // last status the log recorded.
+  const alreadyReported = reconcile
+    ? (await env.CHANGELOG_KV.get(RECONCILED_KEY, 'json')) ?? {}
+    : {};
   const reconciledRows = reconcile
     ? buildReconciliationRows(snapshot, normalized, {
         detectedAtMs: now * 1000,
         notBeforeMs: (emitSince ?? now - RECONCILE_EMIT_SECONDS) * 1000,
+        alreadyReported,
       })
     : [];
 
@@ -164,6 +174,10 @@ async function run(env, { dryRun = false, reconcile = false, emitSince = null } 
   // again next run rather than being lost.
   await env.CHANGELOG_KV.put(CURSOR_KEY, String(now));
   await env.CHANGELOG_KV.put(SNAPSHOT_KEY, JSON.stringify(compactSnapshot(snapshot)));
+  if (reconcile && reconciledRows.length > 0) {
+    for (const row of reconciledRows) alreadyReported[row.object_id] = row.to;
+    await env.CHANGELOG_KV.put(RECONCILED_KEY, JSON.stringify(alreadyReported));
+  }
 
   return summary;
 }
