@@ -117,6 +117,33 @@ once, guarded by the `sheet_format_version` KV key; bump `FORMAT_VERSION` in
 `src/index.js` to re-apply. It is display-only — the stored values are correct
 either way — so a formatting failure is logged and the run continues.
 
+## Two sources
+
+**The activity log** is primary. It is the only source that knows *who* made a
+change, so it is the only one that can produce attributed rows.
+
+**Status snapshots** cover for it. Meta's activity log is demonstrably
+incomplete: ad `120252068912490136` was paused on 2026-09-08 and the log
+contained no event for it in the following 30 days, while logging other events
+that same morning. So every run also reads the configured `status` of every
+campaign, ad set and ad, stores it in KV under `status_snapshot`, and diffs
+consecutive snapshots.
+
+A diff knows what changed but not who did it, so those rows are written with
+`actor = "unknown (state diff)"`, a `_STD` change_id suffix, and a note in
+`rule_context_prev_24h`. Their `datetime` is when the change was *detected* —
+somewhere within the previous 15 minutes — not when it happened. A diff is
+dropped when the activity log carries any status event for that object in the
+window, so the two sources never double-report.
+
+The first run stores a baseline and reports nothing, rather than reporting the
+whole account as changed.
+
+Cost: ~21 subrequests per run at the current account size (6,800 objects), of
+which 16 are the snapshot. The Workers limit is 50 per invocation on the free
+plan, so there is room for roughly 14,000 more ads before the page size in
+`src/state.js` needs raising.
+
 ## Behaviour worth knowing
 
 **Actor ids are app-scoped.** The same person has a different `actor_id`

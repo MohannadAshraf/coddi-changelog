@@ -354,12 +354,17 @@ export function toSheetRow(row) {
  * Rule-driven events are kept through the fetch and used for rule_context, but
  * never become rows of their own.
  */
-export function buildRows(rawEvents) {
+export function normalizeAll(rawEvents) {
   const normalized = [];
   for (const raw of rawEvents ?? []) {
     const n = normalizeEvent(raw);
     if (n) normalized.push(n);
   }
+  return normalized;
+}
+
+export function buildRows(rawEvents) {
+  const normalized = normalizeAll(rawEvents);
 
   const ruleEvents = normalized.filter((n) => n.isRule && !n.exclude);
   const humanEvents = normalized.filter(isHumanRow);
@@ -385,6 +390,74 @@ export function buildRows(rawEvents) {
   }
 
   rows.sort((a, b) => a.ts - b.ts || a.change_id.localeCompare(b.change_id));
+  return rows;
+}
+
+// ---------------------------------------------------------------------------
+// State-diff rows
+//
+// Recovered from snapshot comparison rather than the activity log, for changes
+// Meta never logged. A diff knows what changed but not who did it, so these
+// rows cannot be attributed to a person or separated from rule activity — they
+// are labelled accordingly rather than being silently credited to a human.
+// ---------------------------------------------------------------------------
+
+export const STATE_DIFF_ACTOR = 'unknown (state diff)';
+
+/** The activity log's vocabulary, so one sheet does not mix both dialects. */
+const ENTITY_STATUS_LABEL = {
+  ACTIVE: 'Active',
+  PAUSED: 'Inactive',
+  ARCHIVED: 'Archived',
+  DELETED: 'Deleted',
+};
+
+const statusLabel = (s) => ENTITY_STATUS_LABEL[s] ?? String(s ?? '');
+
+/**
+ * Turn snapshot diffs into rows, dropping any the activity log already
+ * explains.
+ *
+ * `normalized` must be every normalised event from the window — rule-driven and
+ * ad-review events included. If Meta logged any status event at all for an
+ * object, the log is the better record and the diff is redundant.
+ */
+export function buildStateDiffRows(diffs, normalized, detectedAtMs) {
+  const explained = new Set(
+    (normalized ?? [])
+      .filter((n) => n.category === 'STA' || n.exclude)
+      .map((n) => n.objectId),
+  );
+  const ruleEvents = (normalized ?? []).filter((n) => n.isRule && !n.exclude);
+
+  const rows = [];
+  for (const diff of diffs ?? []) {
+    if (explained.has(diff.objectId)) continue;
+
+    const row = {
+      ts: detectedAtMs,
+      // A distinct suffix: these are detected at a time, not stamped at one, so
+      // they must never collide with a log-derived id for the same object.
+      change_id: `${cairoStamp(detectedAtMs)}_${diff.objectId}_STD`,
+      datetime: cairoDateTime(detectedAtMs),
+      actor: STATE_DIFF_ACTOR,
+      level: diff.level,
+      object_name: diff.name,
+      object_id: diff.objectId,
+      event: 'Status',
+      from: statusLabel(diff.from),
+      to: statusLabel(diff.to),
+      why: '',
+    };
+    const context = ruleContextFor(row, ruleEvents);
+    row.rule_context_prev_24h = [
+      context,
+      '[state diff — Meta logged no event; time is when detected]',
+    ]
+      .filter(Boolean)
+      .join(' ');
+    rows.push(row);
+  }
   return rows;
 }
 

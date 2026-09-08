@@ -1,8 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { diffSnapshots } from '../src/state.js';
 import {
   buildRows,
+  normalizeAll,
+  buildStateDiffRows,
+  STATE_DIFF_ACTOR,
   filterNewRows,
   formatBudget,
   cleanRuleName,
@@ -478,4 +482,116 @@ test('rows are ordered oldest first', () => {
     statusEvent({ time: '2026-09-08T08:00:00+0000', actor: OMAR, objectId: 'a', from: 'Active', to: 'Inactive' }),
   ]);
   assert.deepEqual(rows.map((r) => r.object_id), ['a', 'b']);
+});
+
+// ---------------------------------------------------------------------------
+// State diffing — recovering changes Meta never logged
+// ---------------------------------------------------------------------------
+
+const AT = Date.parse('2026-09-08T16:45:00Z');
+
+test('diffSnapshots reports only objects whose status actually changed', () => {
+  // Previous snapshots are stored compactly: id -> status.
+  const before = { a: 'ACTIVE', b: 'PAUSED', gone: 'ACTIVE' };
+  const after = {
+    a: { level: 'Ad', status: 'PAUSED', name: 'Ad A' },
+    b: { level: 'Ad', status: 'PAUSED', name: 'Ad B' },
+    fresh: { level: 'Ad', status: 'ACTIVE', name: 'Ad New' },
+  };
+
+  const diffs = diffSnapshots(before, after);
+  assert.equal(diffs.length, 1);
+  assert.equal(diffs[0].objectId, 'a');
+  assert.equal(diffs[0].from, 'ACTIVE');
+  assert.equal(diffs[0].to, 'PAUSED');
+});
+
+test('the first run has no previous snapshot and reports nothing', () => {
+  assert.deepEqual(diffSnapshots(null, { a: { level: 'Ad', status: 'ACTIVE', name: 'A' } }), []);
+});
+
+test('the real missed pause is recovered as a row', () => {
+  // Ad 120252068912490136 was paused on 2026-09-08 with no activity event
+  // written by Meta in the following 30 days.
+  const diffs = diffSnapshots(
+    { '120252068912490136': 'ACTIVE' },
+    { '120252068912490136': { level: 'Ad', status: 'PAUSED', name: 'Orbit Black Tee | Model Back Print | Video | V1' } },
+  );
+  const rows = buildStateDiffRows(diffs, [], AT);
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].level, 'Ad');
+  assert.equal(rows[0].object_name, 'Orbit Black Tee | Model Back Print | Video | V1');
+  assert.equal(rows[0].event, 'Status');
+  assert.equal(rows[0].from, 'Active');
+  assert.equal(rows[0].to, 'Inactive');
+  assert.equal(rows[0].actor, STATE_DIFF_ACTOR);
+  assert.equal(rows[0].why, '');
+  assert.match(rows[0].rule_context_prev_24h, /state diff/);
+});
+
+test('a diff is suppressed when the activity log already explains it', () => {
+  const diffs = [{ objectId: '42', level: 'Ad', name: 'Ad', from: 'ACTIVE', to: 'PAUSED' }];
+  const logged = normalizeAll([
+    statusEvent({ time: '2026-09-08T16:40:00+0000', actor: MOHANAD, objectId: '42', from: 'Active', to: 'Inactive' }),
+  ]);
+  assert.deepEqual(buildStateDiffRows(diffs, logged, AT), []);
+});
+
+test('a rule-driven change in the log also suppresses the diff', () => {
+  const diffs = [{ objectId: '42', level: 'Ad', name: 'Ad', from: 'ACTIVE', to: 'PAUSED' }];
+  const logged = normalizeAll([
+    statusEvent({ time: '2026-09-08T16:40:00+0000', actor: RULE, objectId: '42', from: 'Active', to: 'Inactive', rule: 'CODDI GUARD-K2 | 2026-09 | unprofitable kill' }),
+  ]);
+  assert.deepEqual(buildStateDiffRows(diffs, logged, AT), []);
+});
+
+test('an ad-review-only event still suppresses the diff', () => {
+  const diffs = [{ objectId: '42', level: 'Ad', name: 'Ad', from: 'ACTIVE', to: 'PAUSED' }];
+  const logged = normalizeAll([
+    {
+      event_time: '2026-09-08T16:40:00+0000',
+      event_type: 'update_ad_run_status_to_be_set_after_review',
+      translated_event_type: 'Updated status of ad after it finishes ad review',
+      extra_data: JSON.stringify({ old_value: 'Active', new_value: 'Inactive' }),
+      object_id: '42',
+      object_name: 'Ad',
+      ...MOHANAD,
+    },
+  ]);
+  assert.deepEqual(buildStateDiffRows(diffs, logged, AT), []);
+});
+
+test('a logged change to a different object does not suppress the diff', () => {
+  const diffs = [{ objectId: '42', level: 'Ad', name: 'Ad', from: 'ACTIVE', to: 'PAUSED' }];
+  const logged = normalizeAll([
+    statusEvent({ time: '2026-09-08T16:40:00+0000', actor: MOHANAD, objectId: 'other', from: 'Active', to: 'Inactive' }),
+  ]);
+  assert.equal(buildStateDiffRows(diffs, logged, AT).length, 1);
+});
+
+test('state-diff change_ids use the STD suffix so they cannot collide with log rows', () => {
+  const diffs = [{ objectId: '42', level: 'Ad', name: 'Ad', from: 'ACTIVE', to: 'PAUSED' }];
+  const [row] = buildStateDiffRows(diffs, [], AT);
+  assert.equal(row.change_id, '20260908T1945_42_STD');
+
+  const logRow = buildRows([
+    statusEvent({ time: '2026-09-08T16:45:00+0000', actor: MOHANAD, objectId: '42', from: 'Active', to: 'Inactive' }),
+  ])[0];
+  assert.notEqual(row.change_id, logRow.change_id);
+});
+
+test('a state-diff row is deduped like any other on the next run', () => {
+  const diffs = [{ objectId: '42', level: 'Ad', name: 'Ad', from: 'ACTIVE', to: 'PAUSED' }];
+  const rows = buildStateDiffRows(diffs, [], AT);
+  assert.deepEqual(filterNewRows(rows, new Set(rows.map((r) => r.change_id))), []);
+});
+
+test('a rule that acted in the previous 24h still shows as context on a diff row', () => {
+  const diffs = [{ objectId: '42', level: 'Ad', name: 'Ad', from: 'ACTIVE', to: 'PAUSED' }];
+  const logged = normalizeAll([
+    budgetEvent({ time: '2026-09-08T13:00:00+0000', actor: RULE, objectId: '42', fromPiastres: 45000, toPiastres: 40500, rule: 'CODDI AUTOSCALE-P | 2026-09 | Testing' }),
+  ]);
+  const [row] = buildStateDiffRows(diffs, logged, AT);
+  assert.match(row.rule_context_prev_24h, /^AUTOSCALE-P \| Testing set 450\.00 → 405\.00 at 08 Sep 16:00 \[state diff/);
 });

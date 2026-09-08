@@ -4,6 +4,11 @@
  * The sheet is a human-facing change log: only changes made by Mohanad or Omar
  * become rows. Automated-rule actions and Meta system events are excluded from
  * the rows themselves but feed the rule_context_prev_24h column.
+ *
+ * Two sources feed it. The activity log is primary and is the only one that
+ * knows who made a change. Because that log demonstrably omits some changes,
+ * entity status is also snapshotted each run and diffed, recovering what the
+ * log missed at the cost of not knowing the actor.
  */
 
 import { fetchActivities } from './meta.js';
@@ -13,7 +18,15 @@ import {
   appendRows,
   applyColumnFormats,
 } from './sheets.js';
-import { buildRows, filterNewRows, toSheetRow, HEADERS } from './transform.js';
+import { fetchStatusSnapshot, diffSnapshots, compactSnapshot } from './state.js';
+import {
+  buildRows,
+  normalizeAll,
+  buildStateDiffRows,
+  filterNewRows,
+  toSheetRow,
+  HEADERS,
+} from './transform.js';
 
 const CURSOR_KEY = 'last_run_unix';
 /**
@@ -23,7 +36,16 @@ const CURSOR_KEY = 'last_run_unix';
 const FORMAT_KEY = 'sheet_format_version';
 // v2: re-applied after deleting rows stripped the per-cell formats.
 const FORMAT_VERSION = '2';
-/** Re-fetch an hour of already-seen events so a late-arriving event is caught. */
+/** Last seen status of every campaign, ad set and ad, for state diffing. */
+const SNAPSHOT_KEY = 'status_snapshot';
+/**
+ * Re-fetch an hour of already-seen events so a late-arriving event is caught.
+ *
+ * Do not widen this without changing how change_id is derived. A row's id comes
+ * from the earliest event in its (object, category, day) group, so a wider
+ * window would re-collapse an afternoon change into the morning group, find
+ * that id already in the sheet, and drop the change instead of logging it.
+ */
 const OVERLAP_SECONDS = 3600;
 /** First ever run has no cursor; look back a day rather than all of history. */
 const COLD_START_SECONDS = 24 * 3600;
@@ -43,9 +65,25 @@ async function run(env, { dryRun = false } = {}) {
   const raw = await fetchActivities(env, since, now);
   const rows = buildRows(raw);
 
+  // Meta's activity log misses some changes entirely, so entity status is also
+  // snapshotted and diffed. On the very first run there is no previous
+  // snapshot: store the baseline and report nothing, rather than reporting the
+  // whole account as changed.
+  const snapshot = await fetchStatusSnapshot(env);
+  const previous = await env.CHANGELOG_KV.get(SNAPSHOT_KEY, 'json');
+  const diffRows = buildStateDiffRows(
+    diffSnapshots(previous, snapshot),
+    normalizeAll(raw),
+    now * 1000,
+  );
+
+  const allRows = [...rows, ...diffRows].sort(
+    (a, b) => a.ts - b.ts || a.change_id.localeCompare(b.change_id),
+  );
+
   const token = await getAccessToken(env);
   const { ids, rowCount, hasHeader } = await readChangeIds(env, token);
-  const fresh = filterNewRows(rows, ids);
+  const fresh = filterNewRows(allRows, ids);
 
   const values = fresh.map(toSheetRow);
   if (rowCount === 0 && !hasHeader) values.unshift(HEADERS);
@@ -54,9 +92,13 @@ async function run(env, { dryRun = false } = {}) {
     since,
     until: now,
     raw_events: raw.length,
-    candidate_rows: rows.length,
+    candidate_rows: allRows.length,
+    from_activity_log: rows.length,
+    from_state_diff: diffRows.length,
+    snapshot_size: Object.keys(snapshot).length,
+    snapshot_baseline: previous === null,
     new_rows: fresh.length,
-    skipped_as_duplicate: rows.length - fresh.length,
+    skipped_as_duplicate: allRows.length - fresh.length,
     existing_ids: ids.size,
     dry_run: dryRun,
   };
@@ -78,8 +120,11 @@ async function run(env, { dryRun = false } = {}) {
 
   // Single append call: all rows land or none do.
   await appendRows(env, token, values);
-  // Only advanced after a fully successful cycle.
+  // Both only advanced after a fully successful cycle. If the append throws,
+  // the snapshot is not saved either, so a diff detected this run is detected
+  // again next run rather than being lost.
   await env.CHANGELOG_KV.put(CURSOR_KEY, String(now));
+  await env.CHANGELOG_KV.put(SNAPSHOT_KEY, JSON.stringify(compactSnapshot(snapshot)));
 
   return summary;
 }
