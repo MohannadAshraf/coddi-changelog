@@ -23,7 +23,9 @@ import {
   buildRows,
   normalizeAll,
   buildStateDiffRows,
+  buildReconciliationRows,
   filterNewRows,
+  parseEventTime,
   toSheetRow,
   HEADERS,
 } from './transform.js';
@@ -49,21 +51,44 @@ const SNAPSHOT_KEY = 'status_snapshot';
 const OVERLAP_SECONDS = 3600;
 /** First ever run has no cursor; look back a day rather than all of history. */
 const COLD_START_SECONDS = 24 * 3600;
+/**
+ * How far back reconciliation reads the activity log, to establish each
+ * object's last logged status. It only has to reach the last status event per
+ * object, not the beginning of time.
+ */
+const RECONCILE_LOOKBACK_SECONDS = 30 * 24 * 3600;
+/** How far back reconciliation may place a recovered change. */
+const RECONCILE_EMIT_SECONDS = 48 * 3600;
+/** Daily reconciliation sweep, alongside the 2-hourly incremental run. */
+const RECONCILE_CRON = '30 3 * * *';
 
 /**
  * One full cycle. Throws on any Meta or Sheets failure, which leaves the KV
  * cursor untouched so the next run retries the same window.
  */
-async function run(env, { dryRun = false } = {}) {
+async function run(env, { dryRun = false, reconcile = false, emitSince = null } = {}) {
   const now = Math.floor(Date.now() / 1000);
 
   const cursor = await env.CHANGELOG_KV.get(CURSOR_KEY);
-  const since = cursor
+  const incrementalSince = cursor
     ? Number(cursor) - OVERLAP_SECONDS
     : now - COLD_START_SECONDS;
+  // Reconciliation needs enough history to find each object's last logged
+  // status, which is usually far older than the incremental window.
+  const since = reconcile
+    ? Math.min(incrementalSince, now - RECONCILE_LOOKBACK_SECONDS)
+    : incrementalSince;
 
   const raw = await fetchActivities(env, since, now);
-  const rows = buildRows(raw);
+  // A reconciliation sweep reads a much wider window, but only to learn each
+  // object's last logged status and its rule context. Attributed rows must
+  // still come from the incremental window, or every sweep would re-emit weeks
+  // of already-reviewed history.
+  const rows = buildRows(
+    reconcile
+      ? raw.filter((e) => parseEventTime(e.event_time) >= incrementalSince * 1000)
+      : raw,
+  );
 
   // Meta's activity log misses some changes entirely, so entity status is also
   // snapshotted and diffed. On the very first run there is no previous
@@ -71,13 +96,25 @@ async function run(env, { dryRun = false } = {}) {
   // whole account as changed.
   const snapshot = await fetchStatusSnapshot(env);
   const previous = await env.CHANGELOG_KV.get(SNAPSHOT_KEY, 'json');
+  const normalized = normalizeAll(raw);
   const diffRows = buildStateDiffRows(
     diffSnapshots(previous, snapshot),
-    normalizeAll(raw),
+    normalized,
     now * 1000,
   );
 
-  const allRows = [...rows, ...diffRows].sort(
+  // Snapshot diffing only sees changes that happen between two runs, so
+  // anything Meta failed to log before the first snapshot is invisible to it
+  // forever. Reconciliation catches those by comparing live status against the
+  // last status the log recorded.
+  const reconciledRows = reconcile
+    ? buildReconciliationRows(snapshot, normalized, {
+        detectedAtMs: now * 1000,
+        notBeforeMs: (emitSince ?? now - RECONCILE_EMIT_SECONDS) * 1000,
+      })
+    : [];
+
+  const allRows = [...rows, ...diffRows, ...reconciledRows].sort(
     (a, b) => a.ts - b.ts || a.change_id.localeCompare(b.change_id),
   );
 
@@ -95,6 +132,8 @@ async function run(env, { dryRun = false } = {}) {
     candidate_rows: allRows.length,
     from_activity_log: rows.length,
     from_state_diff: diffRows.length,
+    from_reconciliation: reconciledRows.length,
+    reconcile,
     snapshot_size: Object.keys(snapshot).length,
     snapshot_baseline: previous === null,
     new_rows: fresh.length,
@@ -130,10 +169,14 @@ async function run(env, { dryRun = false } = {}) {
 }
 
 export default {
-  /** Cron trigger — every 2 hours. */
+  /**
+   * Cron triggers: the 2-hourly incremental run, plus a daily reconciliation
+   * sweep that also catches changes Meta never logged at all.
+   */
   async scheduled(event, env, ctx) {
+    const reconcile = event.cron === RECONCILE_CRON;
     ctx.waitUntil(
-      run(env).then(
+      run(env, { reconcile }).then(
         (summary) => console.log('coddi-changelog ok', JSON.stringify(summary)),
         (err) => {
           console.error('coddi-changelog failed:', err?.stack ?? String(err));
@@ -160,12 +203,24 @@ export default {
     }
 
     const dryRun = url.pathname === '/dry-run';
-    if (!dryRun && url.pathname !== '/run') {
+    const reconcile =
+      url.pathname === '/reconcile' || url.searchParams.get('reconcile') === '1';
+    if (!dryRun && !reconcile && url.pathname !== '/run') {
       return new Response('Not found\n', { status: 404 });
     }
 
+    // ?since=YYYY-MM-DD (Africa/Cairo) bounds how far back a reconciliation
+    // sweep may place recovered rows. Defaults to the last 48 hours.
+    const sinceParam = url.searchParams.get('since');
+    const emitSince = sinceParam
+      ? Math.floor(Date.parse(`${sinceParam}T00:00:00+03:00`) / 1000)
+      : null;
+    if (sinceParam && !Number.isFinite(emitSince)) {
+      return new Response('Bad since= date, expected YYYY-MM-DD\n', { status: 400 });
+    }
+
     try {
-      const summary = await run(env, { dryRun });
+      const summary = await run(env, { dryRun, reconcile, emitSince });
       return Response.json(summary);
     } catch (err) {
       console.error('coddi-changelog failed:', err?.stack ?? String(err));

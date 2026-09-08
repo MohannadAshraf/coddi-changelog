@@ -7,9 +7,11 @@ compatibility_date = "2026-09-01"
 [vars]
 AD_ACCOUNT_ID = "904315886897104"
 
-# Every 2 hours, on the hour.
+# Every 2 hours for the incremental run, plus a daily reconciliation sweep that
+# recovers changes Meta never logged. The second entry must stay in step with
+# RECONCILE_CRON in src/index.js.
 [triggers]
-crons = ["0 */2 * * *"]
+crons = ["0 */2 * * *", "30 3 * * *"]
 
 # Cursor storage. Replace `id` with the value printed by:
 #   npx wrangler kv namespace create CHANGELOG_KV

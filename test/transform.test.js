@@ -6,6 +6,7 @@ import {
   buildRows,
   normalizeAll,
   buildStateDiffRows,
+  buildReconciliationRows,
   STATE_DIFF_ACTOR,
   filterNewRows,
   formatBudget,
@@ -620,4 +621,110 @@ test('detection time is the fallback when updated_time is missing', () => {
   const [row] = buildStateDiffRows(diffs, [], Date.parse('2026-09-08T16:45:00Z'));
   assert.equal(row.datetime, '2026-09-08 19:45');
   assert.match(row.rule_context_prev_24h, /time is when detected/);
+});
+
+// ---------------------------------------------------------------------------
+// Reconciliation — recovering changes that predate the first snapshot
+// ---------------------------------------------------------------------------
+
+const NOW = Date.parse('2026-09-08T17:30:00Z');
+const TODAY = Date.parse('2026-09-07T21:00:00Z');
+
+test('a status contradicting the last logged status is recovered', () => {
+  // Ad 120251978730660136: log says Active since 25 Aug, live status is PAUSED,
+  // updated_time is today. Meta wrote no event for the pause.
+  const snapshot = {
+    '120251978730660136': {
+      level: 'Ad',
+      status: 'PAUSED',
+      name: 'Grey Sweatpants | Model Wall | Video | V2',
+      updatedTime: '2026-09-08T13:20:54+0300',
+    },
+  };
+  const log = normalizeAll([
+    statusEvent({ time: '2026-08-25T09:22:04+0000', actor: RULE, objectId: '120251978730660136', from: 'Pending Review', to: 'Active' }),
+  ]);
+
+  const rows = buildReconciliationRows(snapshot, log, { detectedAtMs: NOW, notBeforeMs: TODAY });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].from, 'Active');
+  assert.equal(rows[0].to, 'Inactive');
+  assert.equal(rows[0].datetime, '2026-09-08 13:20');
+  assert.equal(rows[0].change_id, '20260908T1320_120251978730660136_STD');
+  assert.equal(rows[0].level, 'Ad');
+});
+
+test('an object whose live status matches the log is left alone', () => {
+  const snapshot = {
+    x: { level: 'Ad', status: 'PAUSED', name: 'Ad', updatedTime: '2026-09-08T13:00:00+0300' },
+  };
+  const log = normalizeAll([
+    statusEvent({ time: '2026-09-08T09:00:00+0000', actor: MOHANAD, objectId: 'x', from: 'Active', to: 'Inactive' }),
+  ]);
+  assert.deepEqual(buildReconciliationRows(snapshot, log, { detectedAtMs: NOW, notBeforeMs: TODAY }), []);
+});
+
+test('an object with nothing logged is never guessed at', () => {
+  const snapshot = {
+    x: { level: 'Ad', status: 'PAUSED', name: 'Ad', updatedTime: '2026-09-08T13:00:00+0300' },
+  };
+  assert.deepEqual(buildReconciliationRows(snapshot, [], { detectedAtMs: NOW, notBeforeMs: TODAY }), []);
+});
+
+test('transient statuses are never treated as a resting state', () => {
+  const snapshot = {
+    x: { level: 'Ad', status: 'PAUSED', name: 'Ad', updatedTime: '2026-09-08T13:00:00+0300' },
+  };
+  // The only later event is a staging value, so the last resting status is
+  // still Active and the mismatch stands.
+  const log = normalizeAll([
+    statusEvent({ time: '2026-08-25T09:00:00+0000', actor: RULE, objectId: 'x', from: 'Inactive', to: 'Active' }),
+    statusEvent({ time: '2026-08-26T09:00:00+0000', actor: RULE, objectId: 'x', from: 'Active', to: 'Pending Review' }),
+  ]);
+  const rows = buildReconciliationRows(snapshot, log, { detectedAtMs: NOW, notBeforeMs: TODAY });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].from, 'Active');
+});
+
+test('a change older than the emit floor is not dragged into the sheet', () => {
+  const snapshot = {
+    x: { level: 'Ad', status: 'PAUSED', name: 'Ad', updatedTime: '2026-09-02T13:00:00+0300' },
+  };
+  const log = normalizeAll([
+    statusEvent({ time: '2026-08-25T09:00:00+0000', actor: RULE, objectId: 'x', from: 'Inactive', to: 'Active' }),
+  ]);
+  assert.deepEqual(buildReconciliationRows(snapshot, log, { detectedAtMs: NOW, notBeforeMs: TODAY }), []);
+});
+
+test('an updated_time at or before the last logged event is not trusted', () => {
+  const snapshot = {
+    x: { level: 'Ad', status: 'PAUSED', name: 'Ad', updatedTime: '2026-08-20T13:00:00+0300' },
+  };
+  const log = normalizeAll([
+    statusEvent({ time: '2026-08-25T09:00:00+0000', actor: RULE, objectId: 'x', from: 'Inactive', to: 'Active' }),
+  ]);
+  assert.deepEqual(buildReconciliationRows(snapshot, log, { detectedAtMs: NOW, notBeforeMs: 0 }), []);
+});
+
+test('reconciliation and snapshot diffing produce identical row shapes', () => {
+  const common = { level: 'Ad', name: 'Ad', updatedTime: '2026-09-08T13:20:54+0300' };
+  const viaDiff = buildStateDiffRows(
+    [{ objectId: 'x', from: 'ACTIVE', to: 'PAUSED', ...common }],
+    [],
+    NOW,
+  )[0];
+  const viaReconcile = buildReconciliationRows(
+    { x: { status: 'PAUSED', ...common } },
+    normalizeAll([
+      statusEvent({ time: '2026-08-25T09:00:00+0000', actor: RULE, objectId: 'x', from: 'Inactive', to: 'Active' }),
+    ]),
+    { detectedAtMs: NOW, notBeforeMs: TODAY },
+  )[0];
+
+  assert.deepEqual(Object.keys(viaDiff).sort(), Object.keys(viaReconcile).sort());
+  assert.match(viaReconcile.rule_context_prev_24h, /changed at or before this time/);
+  assert.equal(viaDiff.rule_context_prev_24h, '[state diff — Meta logged no event]');
+  assert.equal(viaDiff.change_id, viaReconcile.change_id);
+  assert.equal(viaDiff.from, viaReconcile.from);
+  assert.equal(viaDiff.to, viaReconcile.to);
 });

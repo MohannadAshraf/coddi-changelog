@@ -414,6 +414,128 @@ const ENTITY_STATUS_LABEL = {
 
 const statusLabel = (s) => ENTITY_STATUS_LABEL[s] ?? String(s ?? '');
 
+// Staging values that are never a resting state, so never the answer to "what
+// is this object's status".
+const TRANSIENT_STATUSES = new Set(['pending process', 'pending review']);
+const isTransient = (v) =>
+  TRANSIENT_STATUSES.has(String(v ?? '').trim().toLowerCase().replace(/_/g, ' '));
+
+/**
+ * Shared row shape for both snapshot diffs and log reconciliation.
+ *
+ * `upperBound` marks a row whose timestamp is only an upper bound. A snapshot
+ * diff knows the change happened since the last run, so updated_time is
+ * effectively exact. Reconciliation has no such bracket: the change could have
+ * happened any time after the last logged event, and updated_time is merely the
+ * object's last edit of any kind — a rule touching the budget at 09:13 stamps
+ * 09:13 on a pause that may have happened hours earlier.
+ */
+function makeRecoveredRow(diff, ruleEvents, detectedAtMs, { upperBound = false } = {}) {
+  // The object's own updated_time is when the change actually happened, which
+  // beats the moment the worker noticed. It reflects the last edit of any kind,
+  // so it can sit slightly after the status change if the object was touched
+  // again before the next run; that is still far closer than detection time.
+  const changedAt = parseEventTime(diff.updatedTime);
+  const exact = Number.isFinite(changedAt);
+  const ts = exact ? changedAt : detectedAtMs;
+
+  const row = {
+    ts,
+    // A distinct suffix so a recovered row can never collide with a
+    // log-derived id for the same object.
+    change_id: `${cairoStamp(ts)}_${diff.objectId}_STD`,
+    datetime: cairoDateTime(ts),
+    actor: STATE_DIFF_ACTOR,
+    level: diff.level,
+    object_name: diff.name,
+    object_id: diff.objectId,
+    event: 'Status',
+    from: diff.from,
+    to: diff.to,
+    why: '',
+  };
+  const note = !exact
+    ? '[state diff — Meta logged no event; time is when detected]'
+    : upperBound
+      ? '[state diff — Meta logged no event; changed at or before this time]'
+      : '[state diff — Meta logged no event]';
+  row.rule_context_prev_24h = [ruleContextFor(row, ruleEvents), note]
+    .filter(Boolean)
+    .join(' ');
+  return row;
+}
+
+/**
+ * The most recent resting status the activity log recorded per object.
+ *
+ * Only real status events count. The ad-review duplicate carries an intended
+ * post-review status rather than an observed one, and it has no category, so it
+ * is naturally excluded here.
+ */
+export function lastLoggedStatus(normalized) {
+  const best = new Map();
+  for (const n of normalized ?? []) {
+    if (n.category !== 'STA') continue;
+    if (!n.to || isTransient(n.to)) continue;
+    const current = best.get(n.objectId);
+    if (!current || n.ts > current.ts) best.set(n.objectId, { status: n.to, ts: n.ts });
+  }
+  return best;
+}
+
+/**
+ * Recover unlogged changes by reconciling live status against the last status
+ * the activity log recorded — no previous snapshot required.
+ *
+ * Snapshot diffing can only see a change that happens between two runs, so
+ * anything Meta failed to log before the first snapshot is invisible to it
+ * forever. Reconciliation closes that hole: if an object's current status
+ * contradicts the last status in the log, a change happened that was never
+ * written, and `updated_time` says when.
+ *
+ * `notBeforeMs` bounds how far back recovered rows may reach, so running this
+ * over a wide activity window does not dump months of history into the sheet.
+ */
+export function buildReconciliationRows(snapshot, normalized, options = {}) {
+  const { detectedAtMs = Date.now(), notBeforeMs = 0 } = options;
+  const logged = lastLoggedStatus(normalized);
+  const ruleEvents = (normalized ?? []).filter((n) => n.isRule && !n.exclude);
+
+  const rows = [];
+  for (const [objectId, entry] of Object.entries(snapshot ?? {})) {
+    const last = logged.get(objectId);
+    // Nothing logged for this object: there is no prior state to contradict, so
+    // no conclusion can be drawn. Better silent than invented.
+    if (!last) continue;
+
+    const current = statusLabel(entry.status);
+    if (!current || isTransient(current) || current === last.status) continue;
+
+    const changedAt = parseEventTime(entry.updatedTime);
+    // Without a trustworthy time after the last logged event, the mismatch
+    // cannot be placed on a timeline and is left alone.
+    if (!Number.isFinite(changedAt) || changedAt <= last.ts) continue;
+    if (changedAt < notBeforeMs) continue;
+
+    rows.push(
+      makeRecoveredRow(
+        {
+          objectId,
+          level: entry.level,
+          name: entry.name,
+          from: last.status,
+          to: current,
+          updatedTime: entry.updatedTime,
+        },
+        ruleEvents,
+        detectedAtMs,
+        { upperBound: true },
+      ),
+    );
+  }
+  return rows;
+}
+
 /**
  * Turn snapshot diffs into rows, dropping any the activity log already
  * explains.
@@ -433,41 +555,13 @@ export function buildStateDiffRows(diffs, normalized, detectedAtMs) {
   const rows = [];
   for (const diff of diffs ?? []) {
     if (explained.has(diff.objectId)) continue;
-
-    // The object's own updated_time is when the change actually happened, which
-    // beats the moment the worker noticed. It reflects the last edit of any
-    // kind, so it can sit slightly after the status change if the object was
-    // touched again before the next run; that is still far closer than
-    // detection time. Detection time is the fallback when Meta omits it.
-    const changedAt = parseEventTime(diff.updatedTime);
-    const exact = Number.isFinite(changedAt);
-    const ts = exact ? changedAt : detectedAtMs;
-
-    const row = {
-      ts,
-      // A distinct suffix so a recovered row can never collide with a
-      // log-derived id for the same object.
-      change_id: `${cairoStamp(ts)}_${diff.objectId}_STD`,
-      datetime: cairoDateTime(ts),
-      actor: STATE_DIFF_ACTOR,
-      level: diff.level,
-      object_name: diff.name,
-      object_id: diff.objectId,
-      event: 'Status',
-      from: statusLabel(diff.from),
-      to: statusLabel(diff.to),
-      why: '',
-    };
-    const context = ruleContextFor(row, ruleEvents);
-    row.rule_context_prev_24h = [
-      context,
-      exact
-        ? '[state diff — Meta logged no event]'
-        : '[state diff — Meta logged no event; time is when detected]',
-    ]
-      .filter(Boolean)
-      .join(' ');
-    rows.push(row);
+    rows.push(
+      makeRecoveredRow(
+        { ...diff, from: statusLabel(diff.from), to: statusLabel(diff.to) },
+        ruleEvents,
+        detectedAtMs,
+      ),
+    );
   }
   return rows;
 }
