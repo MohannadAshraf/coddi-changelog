@@ -1,7 +1,7 @@
 # coddi-changelog
 
 Cloudflare Worker that appends **manual** Meta ad account changes to a Google
-Sheet. Runs on a cron every 15 minutes.
+Sheet. Runs on a cron every 2 hours.
 
 - Ad account: `act_904315886897104` (Coddiwomple, EGP, Africa/Cairo)
 - Sheet tab: `change_log`
@@ -132,7 +132,7 @@ consecutive snapshots.
 A diff knows what changed but not who did it, so those rows are written with
 `actor = "unknown (state diff)"`, a `_STD` change_id suffix, and a note in
 `rule_context_prev_24h`. Their `datetime` is when the change was *detected* —
-somewhere within the previous 15 minutes — not when it happened. A diff is
+somewhere within the previous 2 hours — not when it happened. A diff is
 dropped when the activity log carries any status event for that object in the
 window, so the two sources never double-report.
 

@@ -130,7 +130,7 @@ async function run(env, { dryRun = false } = {}) {
 }
 
 export default {
-  /** Cron trigger — every 15 minutes. */
+  /** Cron trigger — every 2 hours. */
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
       run(env).then(

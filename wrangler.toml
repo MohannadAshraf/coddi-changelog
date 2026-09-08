@@ -7,9 +7,9 @@ compatibility_date = "2026-09-01"
 [vars]
 AD_ACCOUNT_ID = "904315886897104"
 
-# Every 15 minutes.
+# Every 2 hours, on the hour.
 [triggers]
-crons = ["*/15 * * * *"]
+crons = ["0 */2 * * *"]
 
 # Cursor storage. Replace `id` with the value printed by:
 #   npx wrangler kv namespace create CHANGELOG_KV

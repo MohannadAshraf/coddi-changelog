@@ -75,7 +75,7 @@ export async function fetchStatusSnapshot(env) {
  * The form stored in KV: `{ [objectId]: status }`.
  *
  * This account has ~6,800 objects, so keeping level and name as well would
- * write ~575 KB every 15 minutes to record something only the current snapshot
+ * write ~575 KB on every run to record something only the current snapshot
  * needs — the diff compares status, and the row is built from the current
  * names.
  */
