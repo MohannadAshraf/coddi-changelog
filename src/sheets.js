@@ -193,7 +193,12 @@ export async function appendRows(env, token, values) {
   const range = encodeURIComponent(`${TAB}!A1`);
   const params = new URLSearchParams({
     valueInputOption: 'USER_ENTERED',
-    insertDataOption: 'INSERT_ROWS',
+    // OVERWRITE writes into the existing grid rows below the last row of data,
+    // which already carry the column formats from applyColumnFormats.
+    // INSERT_ROWS would splice in brand-new rows that do not inherit them, so
+    // every appended budget would render as "1936" instead of "1936.00".
+    // This tab holds nothing but the log, so there is nothing below to clobber.
+    insertDataOption: 'OVERWRITE',
   });
   return sheetsFetch(
     `${SHEETS_BASE}/${env.SHEET_ID}/values/${range}:append?${params}`,

@@ -272,7 +272,9 @@ export function collapseGroup(events) {
   // toggled back and forth.
   if (ordered.length > 2) flags.push(`[toggled x${ordered.length}, net shown]`);
   // Never dropped silently: a no-op round trip is still a human action.
-  if (from === to) flags.push('[no net change]');
+  // Creations carry no from/to at all, so an empty-equals-empty comparison is
+  // not a round trip and must not be flagged as one.
+  if (from === to && from !== '') flags.push('[no net change]');
 
   const actors = [...new Set(ordered.map((e) => e.actorName).filter(Boolean))];
 

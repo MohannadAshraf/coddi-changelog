@@ -128,6 +128,25 @@ test('a no-net-change round trip is emitted and flagged, never dropped', () => {
   assert.equal(rows[0].rule_context_prev_24h, '[no net change]');
 });
 
+test('a creation is not flagged as a no-net-change round trip', () => {
+  const rows = buildRows([
+    {
+      event_time: '2026-09-02T10:26:00+0000',
+      event_type: 'create_campaign_group',
+      translated_event_type: 'Campaign created',
+      extra_data: '{}',
+      object_id: '120252094628620136',
+      object_name: 'Sales | Testing',
+      ...OMAR,
+    },
+  ]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].event, 'Created');
+  assert.equal(rows[0].from, '');
+  assert.equal(rows[0].to, '');
+  assert.equal(rows[0].rule_context_prev_24h, '');
+});
+
 test('the same object on different calendar dates stays two rows', () => {
   const rows = buildRows([
     statusEvent({ time: '2026-09-07T20:00:00+0000', actor: OMAR, objectId: '999', from: 'Active', to: 'Inactive' }),

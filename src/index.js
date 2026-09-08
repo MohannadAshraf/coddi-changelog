@@ -21,7 +21,8 @@ const CURSOR_KEY = 'last_run_unix';
  * re-apply after changing applyColumnFormats.
  */
 const FORMAT_KEY = 'sheet_format_version';
-const FORMAT_VERSION = '1';
+// v2: re-applied after deleting rows stripped the per-cell formats.
+const FORMAT_VERSION = '2';
 /** Re-fetch an hour of already-seen events so a late-arriving event is caught. */
 const OVERLAP_SECONDS = 3600;
 /** First ever run has no cursor; look back a day rather than all of history. */
