@@ -595,3 +595,29 @@ test('a rule that acted in the previous 24h still shows as context on a diff row
   const [row] = buildStateDiffRows(diffs, logged, AT);
   assert.match(row.rule_context_prev_24h, /^AUTOSCALE-P \| Testing set 450\.00 → 405\.00 at 08 Sep 16:00 \[state diff/);
 });
+
+test('a recovered row is stamped with the object updated_time, not detection time', () => {
+  const diffs = diffSnapshots(
+    { '120252068912490136': 'ACTIVE' },
+    {
+      '120252068912490136': {
+        level: 'Ad',
+        status: 'PAUSED',
+        name: 'Orbit Black Tee | Model Back Print | Video | V1',
+        updatedTime: '2026-09-08T13:13:29+0300',
+      },
+    },
+  );
+  const [row] = buildStateDiffRows(diffs, [], Date.parse('2026-09-08T19:00:00Z'));
+
+  assert.equal(row.datetime, '2026-09-08 13:13');
+  assert.equal(row.change_id, '20260908T1313_120252068912490136_STD');
+  assert.equal(row.rule_context_prev_24h, '[state diff — Meta logged no event]');
+});
+
+test('detection time is the fallback when updated_time is missing', () => {
+  const diffs = [{ objectId: '42', level: 'Ad', name: 'Ad', from: 'ACTIVE', to: 'PAUSED' }];
+  const [row] = buildStateDiffRows(diffs, [], Date.parse('2026-09-08T16:45:00Z'));
+  assert.equal(row.datetime, '2026-09-08 19:45');
+  assert.match(row.rule_context_prev_24h, /time is when detected/);
+});

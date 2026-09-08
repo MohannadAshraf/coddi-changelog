@@ -434,12 +434,21 @@ export function buildStateDiffRows(diffs, normalized, detectedAtMs) {
   for (const diff of diffs ?? []) {
     if (explained.has(diff.objectId)) continue;
 
+    // The object's own updated_time is when the change actually happened, which
+    // beats the moment the worker noticed. It reflects the last edit of any
+    // kind, so it can sit slightly after the status change if the object was
+    // touched again before the next run; that is still far closer than
+    // detection time. Detection time is the fallback when Meta omits it.
+    const changedAt = parseEventTime(diff.updatedTime);
+    const exact = Number.isFinite(changedAt);
+    const ts = exact ? changedAt : detectedAtMs;
+
     const row = {
-      ts: detectedAtMs,
-      // A distinct suffix: these are detected at a time, not stamped at one, so
-      // they must never collide with a log-derived id for the same object.
-      change_id: `${cairoStamp(detectedAtMs)}_${diff.objectId}_STD`,
-      datetime: cairoDateTime(detectedAtMs),
+      ts,
+      // A distinct suffix so a recovered row can never collide with a
+      // log-derived id for the same object.
+      change_id: `${cairoStamp(ts)}_${diff.objectId}_STD`,
+      datetime: cairoDateTime(ts),
       actor: STATE_DIFF_ACTOR,
       level: diff.level,
       object_name: diff.name,
@@ -452,7 +461,9 @@ export function buildStateDiffRows(diffs, normalized, detectedAtMs) {
     const context = ruleContextFor(row, ruleEvents);
     row.rule_context_prev_24h = [
       context,
-      '[state diff — Meta logged no event; time is when detected]',
+      exact
+        ? '[state diff — Meta logged no event]'
+        : '[state diff — Meta logged no event; time is when detected]',
     ]
       .filter(Boolean)
       .join(' ');

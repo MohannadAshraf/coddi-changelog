@@ -29,7 +29,7 @@ const EDGES = [
 
 async function fetchEdge(env, edge) {
   const params = new URLSearchParams({
-    fields: 'id,name,status',
+    fields: 'id,name,status,updated_time',
     limit: String(PAGE_SIZE),
   });
   let url = `${GRAPH_BASE}/act_${env.AD_ACCOUNT_ID}/${edge}?${params}`;
@@ -65,7 +65,14 @@ export async function fetchStatusSnapshot(env) {
   for (const { edge, level } of EDGES) {
     for (const obj of await fetchEdge(env, edge)) {
       if (!obj?.id) continue;
-      snapshot[obj.id] = { level, status: obj.status ?? '', name: obj.name ?? '' };
+      snapshot[obj.id] = {
+        level,
+        status: obj.status ?? '',
+        name: obj.name ?? '',
+        // The real time of the change, so a recovered row is not stamped with
+        // the moment the worker happened to notice it.
+        updatedTime: obj.updated_time ?? '',
+      };
     }
   }
   return snapshot;
@@ -106,6 +113,7 @@ export function diffSnapshots(previous, current) {
       name: now.name,
       from: before,
       to: now.status,
+      updatedTime: now.updatedTime,
     });
   }
   return diffs;

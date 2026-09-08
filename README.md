@@ -77,8 +77,9 @@ Then `npx wrangler dev` and hit `http://localhost:8787/dry-run?token=...`.
 
 ## Manual trigger
 
-Both endpoints require the optional `RUN_TOKEN` secret. If it is not set, they
-return 403 and only the cron runs.
+Both endpoints require the `RUN_TOKEN` secret. If it is not set, they return 403
+and only the cron runs. Set or rotate it with
+`npx wrangler secret put RUN_TOKEN`.
 
 | Endpoint | Effect |
 |---|---|
@@ -131,10 +132,16 @@ consecutive snapshots.
 
 A diff knows what changed but not who did it, so those rows are written with
 `actor = "unknown (state diff)"`, a `_STD` change_id suffix, and a note in
-`rule_context_prev_24h`. Their `datetime` is when the change was *detected* —
-somewhere within the previous 2 hours — not when it happened. A diff is
-dropped when the activity log carries any status event for that object in the
-window, so the two sources never double-report.
+`rule_context_prev_24h`. A diff is dropped when the activity log carries any
+status event for that object in the window, so the two sources never
+double-report.
+
+`datetime` comes from the object's own `updated_time`, which is when the change
+actually happened rather than when the worker noticed it. That field reflects
+the last edit of any kind, so it can sit slightly after the status change if the
+object was touched again before the next run — still far closer than detection
+time, which is only the fallback when Meta omits the field. Rows stamped from
+detection time say so in `rule_context_prev_24h`.
 
 The first run stores a baseline and reports nothing, rather than reporting the
 whole account as changed.
