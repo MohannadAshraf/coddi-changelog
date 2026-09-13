@@ -1,7 +1,12 @@
 # coddi-changelog
 
 Cloudflare Worker that appends **manual** Meta ad account changes to a Google
-Sheet. Runs on a cron every 2 hours.
+Sheet.
+
+> **Disabled since 2026-09-13.** It has no cron triggers and no `RUN_TOKEN`, so
+> it cannot run on a schedule or on demand. Do not re-enable it unless the owner
+> explicitly asks. To re-enable, restore the `crons` entries noted in
+> `wrangler.toml`, set `RUN_TOKEN`, and redeploy.
 
 - Ad account: `act_904315886897104` (Coddiwomple, EGP, Africa/Cairo)
 - Sheet tab: `change_log`

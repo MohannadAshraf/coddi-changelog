@@ -7,11 +7,15 @@ compatibility_date = "2026-09-01"
 [vars]
 AD_ACCOUNT_ID = "904315886897104"
 
-# Every 2 hours for the incremental run, plus a daily reconciliation sweep that
-# recovers changes Meta never logged. The second entry must stay in step with
-# RECONCILE_CRON in src/index.js.
+# DISABLED 2026-09-13 at the owner's request. It must not run unless the owner
+# explicitly asks for it again. An empty list removes every schedule on deploy.
+#
+# To re-enable: restore the two entries below and set a RUN_TOKEN secret.
+#   crons = ["0 */2 * * *", "30 3 * * *"]
+# (2-hourly incremental run, plus a daily reconciliation sweep; the second entry
+# must stay in step with RECONCILE_CRON in src/index.js.)
 [triggers]
-crons = ["0 */2 * * *", "30 3 * * *"]
+crons = []
 
 # Cursor storage. Replace `id` with the value printed by:
 #   npx wrangler kv namespace create CHANGELOG_KV
